@@ -1,0 +1,956 @@
+diff --git a/.devcontainer/devcontainer.json b/.devcontainer/devcontainer.json
+new file mode 100644
+index 0000000..e1c2895
+--- /dev/null
++++ b/.devcontainer/devcontainer.json
+@@ -0,0 +1,32 @@
++{
++	"name": "k8s devcontainer",
++
++	"image": "mcr.microsoft.com/devcontainers/base:bullseye",
++
++	"features": {
++		"ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
++			"version": "latest",
++			"helm": "none",
++			"minikube": "none"
++		},
++		"ghcr.io/devcontainers/features/git:1": {}
++	},
++
++	"postCreateCommand": "curl -s https://fluxcd.io/install.sh | bash",
++
++	"mounts": [
++		"source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind",
++		"source=${localEnv:HOME}/.kube,target=/home/vscode/.kube,type=bind,consistency=cached"
++	],
++
++	"customizations": {
++		"vscode": {
++			"extensions": [
++				"ms-kubernetes-tools.vscode-kubernetes",
++				"ms-azuretools.vscode-docker",
++				"weaveworks.vscode-flux",
++				"redhat.vscode-yaml"
++			]
++		}
++	}
++}
+\ No newline at end of file
+diff --git a/.gitignore b/.gitignore
+index 40c0613..ceb5ae8 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -12,4 +12,3 @@ env/
+ venv/
+ 
+ 
+-debug.log
+\ No newline at end of file
+diff --git a/Makefile b/Makefile
+new file mode 100644
+index 0000000..a1b9ba2
+--- /dev/null
++++ b/Makefile
+@@ -0,0 +1,44 @@
++REPO = "https://github.com/grupo10-CC3S2/Proyecto7-PC4"
++
++setup-v1:
++	docker build -t timeserver:v1 app
++	kubectl cluster-info
++	kubectl apply -f k8s/
++	kubectl get pods
++
++setup-v2:
++	docker build -t timeserver:v2 app
++	kubectl apply -f k8s/
++	kubectl get pods
++
++teardown:
++	flux suspend kustomization kustomization-github
++	kubectl delete all --all --namespace=default --force --grace-period=0
++	docker image rm timeserver:v1
++	docker image rm timeserver:v2
++
++# GitOps
++
++flux-init:
++	flux check --pre
++	flux install
++
++flux-creater:
++	flux create source git repo-github --url=$(REPO) --branch=main --interval=30s --export > ./flux-gitrepository.yaml
++	kubectl apply -f ./flux-gitrepository.yaml
++	
++flux-createk:
++	flux create kustomization kustomization-github --source=GitRepository/repo-github --path="./k8s" --prune=true --interval=30s --export > ./flux-kustomization.yaml
++	kubectl apply -f ./flux-kustomization.yaml
++
++flux-getk:
++	flux get kustomizations
++
++flux-watchk:
++	flux get kustomizations --watch
++
++flux-suspend:
++	flux suspend kustomization kustomization-github
++
++pod-images:
++	kubectl get pods --namespace=default -o json | jq '.items[].spec.containers[] | {pod: .name, container_name: .name, image: .image}'
+\ No newline at end of file
+diff --git a/README.md b/README.md
+index 8dfb58f..a2d2382 100644
+--- a/README.md
++++ b/README.md
+@@ -11,7 +11,8 @@
+ 
+ 1. Construir la imagen Docker local:
+    ```sh
+-   docker build -t timeserver:latest app
++   docker build -t timeserver:v1 app
++   docker build -t timeserver:v2 app
+    ```
+ 2. Verificar que Kubernetes esta activado:
+    ```sh
+diff --git a/app/logger_service.py b/app/logger_service.py
+new file mode 100644
+index 0000000..356a476
+--- /dev/null
++++ b/app/logger_service.py
+@@ -0,0 +1,48 @@
++import logging
++import time
++import threading
++from datetime import datetime, timezone
++
++logging.basicConfig(
++    level=logging.INFO,
++    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
++)
++
++logger = logging.getLogger(__name__)
++
++stop_logging = False
++
++
++def periodic_warning_logs():
++    warning_count = 1
++    logger.info("logs nivel warning")
++
++    while not stop_logging:
++        time.sleep(10)
++        if not stop_logging:
++            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
++            logger.warning(f"warning #{warning_count} at {timestamp}")
++            warning_count += 1
++
++
++def periodic_error_logs():
++    error_count = 1
++    logger.info("logs nivel error")
++
++    while not stop_logging:
++        time.sleep(20)
++        if not stop_logging:
++            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
++            logger.error(f"error #{error_count} at {timestamp}")
++            error_count += 1
++
++
++def start_background_logging():
++    logger.info("log nivel info start")
++    warning_thread = threading.Thread(target=periodic_warning_logs, daemon=True)
++    warning_thread.start()
++
++    error_thread = threading.Thread(target=periodic_error_logs, daemon=True)
++    error_thread.start()
++
++    logger.info("log nivel info end")
+diff --git a/app/server.py b/app/server.py
+index c202fec..129c4f7 100644
+--- a/app/server.py
++++ b/app/server.py
+@@ -1,6 +1,8 @@
+ from flask import Flask, Response
+ from datetime import datetime, timezone
+ from zoneinfo import ZoneInfo
++from logger_service import start_background_logging, logger
++
+ 
+ app = Flask(__name__)
+ 
+@@ -18,4 +20,6 @@ def get_current_time():
+ 
+ 
+ if __name__ == "__main__":
+-    app.run(host='0.0.0.0', port=80)
+\ No newline at end of file
++    start_background_logging()
++    logger.info("Flask server starting on 0.0.0.0:80")
++    app.run(host='0.0.0.0', port=80)
+diff --git a/flux-gitrepository.yaml b/flux-gitrepository.yaml
+new file mode 100644
+index 0000000..da2aacb
+--- /dev/null
++++ b/flux-gitrepository.yaml
+@@ -0,0 +1,11 @@
++---
++apiVersion: source.toolkit.fluxcd.io/v1
++kind: GitRepository
++metadata:
++  name: repo-github
++  namespace: flux-system
++spec:
++  interval: 30s
++  ref:
++    branch: main
++  url: https://github.com/grupo10-CC3S2/Proyecto7-PC4
+diff --git a/flux-kustomization.yaml b/flux-kustomization.yaml
+new file mode 100644
+index 0000000..bb7d6a0
+--- /dev/null
++++ b/flux-kustomization.yaml
+@@ -0,0 +1,13 @@
++---
++apiVersion: kustomize.toolkit.fluxcd.io/v1
++kind: Kustomization
++metadata:
++  name: kustomization-github
++  namespace: flux-system
++spec:
++  interval: 30s
++  path: ./k8s
++  prune: true
++  sourceRef:
++    kind: GitRepository
++    name: repo-github
+diff --git a/k8s/deploy.yaml b/k8s/deploy.yaml
+index 31585a8..098e2a4 100644
+--- a/k8s/deploy.yaml
++++ b/k8s/deploy.yaml
+@@ -2,6 +2,7 @@ apiVersion: apps/v1
+ kind: Deployment
+ metadata:
+   name: timeserver
++  namespace: default
+ spec:
+   replicas: 3
+   selector:
+@@ -14,5 +15,5 @@ spec:
+     spec:
+       containers:
+       - name: timeserver-container
+-        image: timeserver:latest
++        image: timeserver:v2
+         imagePullPolicy: Never
+\ No newline at end of file
+diff --git a/k8s/service.yaml b/k8s/service.yaml
+index 642f9ff..d358ae5 100644
+--- a/k8s/service.yaml
++++ b/k8s/service.yaml
+@@ -2,6 +2,7 @@ apiVersion: v1
+ kind: Service
+ metadata:
+   name: timeserver
++  namespace: default
+ spec:
+   selector:
+     pod: timeserver-pod
+diff --git a/requirements.txt b/requirements.txt
+index b025dd9..c4c6180 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -5,7 +5,4 @@ pytest
+ pytest-cov
+ pytest-mock
+ pytest-html
+-kubernetes
+-pandas
+-tabulate
+-plotly.express
+\ No newline at end of file
++kubernetes
+\ No newline at end of file
+diff --git a/scripts/log_collector/Img/get_default_name_pods.png b/scripts/Img/get_default_name_pods.png
+similarity index 100%
+rename from scripts/log_collector/Img/get_default_name_pods.png
+rename to scripts/Img/get_default_name_pods.png
+diff --git a/scripts/log_collector/Img/get_default_pods.png b/scripts/Img/get_default_pods.png
+similarity index 100%
+rename from scripts/log_collector/Img/get_default_pods.png
+rename to scripts/Img/get_default_pods.png
+diff --git a/scripts/log_collector/Img/namespaces.png b/scripts/Img/namespaces.png
+similarity index 100%
+rename from scripts/log_collector/Img/namespaces.png
+rename to scripts/Img/namespaces.png
+diff --git a/scripts/log_collector/Img/namspace_default.png b/scripts/Img/namspace_default.png
+similarity index 100%
+rename from scripts/log_collector/Img/namspace_default.png
+rename to scripts/Img/namspace_default.png
+diff --git a/scripts/log_collector/Img/namspace_kube.png b/scripts/Img/namspace_kube.png
+similarity index 100%
+rename from scripts/log_collector/Img/namspace_kube.png
+rename to scripts/Img/namspace_kube.png
+diff --git a/scripts/log_collector/Img/only_podnames.png b/scripts/Img/only_podnames.png
+similarity index 100%
+rename from scripts/log_collector/Img/only_podnames.png
+rename to scripts/Img/only_podnames.png
+diff --git a/scripts/log_collector/Img/sin_namespace.png b/scripts/Img/sin_namespace.png
+similarity index 100%
+rename from scripts/log_collector/Img/sin_namespace.png
+rename to scripts/Img/sin_namespace.png
+diff --git a/scripts/log_collector/README-bash.md b/scripts/README-bash.md
+similarity index 100%
+rename from scripts/log_collector/README-bash.md
+rename to scripts/README-bash.md
+diff --git a/scripts/log_collector/README-python.md b/scripts/README-python.md
+similarity index 100%
+rename from scripts/log_collector/README-python.md
+rename to scripts/README-python.md
+diff --git a/scripts/log_collector/log_collector.py b/scripts/log_collector.py
+similarity index 57%
+rename from scripts/log_collector/log_collector.py
+rename to scripts/log_collector.py
+index ab4f1f1..de5609e 100644
+--- a/scripts/log_collector/log_collector.py
++++ b/scripts/log_collector.py
+@@ -1,37 +1,17 @@
+ import os
+ import subprocess
+ import sys
+-from pathlib import Path
+-
+-
+-def find_root_dir(target_folder_name):
+-    current = Path(__file__).resolve()
+-    while current.name != target_folder_name:
+-        if current.parent == current:
+-            raise FileNotFoundError(
+-                f"No se encontró el directorio '{target_folder_name}' hacia arriba desde {__file__}"
+-            )
+-        current = current.parent
+-    return current
+-
+ 
+ namespace = sys.argv[1] if len(sys.argv) > 1 else "default"
+ 
+-
+-root_dir = find_root_dir("Proyecto7-PC4")
+-
+-
+-logs_dir = root_dir / "logs"
+-logs_dir.mkdir(exist_ok=True)
++os.makedirs("logs", exist_ok=True)
+ 
+ 
+ def get_pods(namespace="default"):
+     try:
+         result = subprocess.run(
+             ["kubectl", "get", "pods", "-n", namespace, "-o", "name"],
+-            capture_output=True,
+-            text=True,
+-            check=True,
++            capture_output=True, text=True, check=True
+         )
+         pods = [line.replace("pod/", "") for line in result.stdout.strip().splitlines()]
+         return pods
+@@ -43,31 +23,23 @@ def get_pods(namespace="default"):
+ def collect_logs(pods, namespace="default"):
+     for pod in pods:
+         print(f"Recolectando logds del pod: {pod}")
+-        with open(logs_dir / "all_pods.log", "a", encoding="utf-8") as all_log_file:
+-            all_log_file.write(
+-                f"=================== Logs del pod: {pod} ===================\n"
+-            )
++        with open("logs/all_pods.log", "a", encoding="utf-8") as all_log_file:
++            all_log_file.write(f"=================== Logs del pod: {pod} ===================\n")
+ 
+             try:
+                 log_result = subprocess.run(
+                     ["kubectl", "logs", pod, "-n", namespace],
+-                    capture_output=True,
+-                    text=True,
+-                    check=True,
++                    capture_output=True, text=True, check=True
+                 )
+ 
+                 name_pod = pod.replace("timeserver-7c9445b569-", "")
+-                pod_log_path = logs_dir / f"{name_pod}.log"
++                pod_log_path = f"logs/{name_pod}.log"
+ 
+                 with open(pod_log_path, "a", encoding="utf-8") as pod_log_file:
+                     pod_log_file.write(log_result.stdout)
+                 all_log_file.write(log_result.stdout)
+-                all_log_file.write(
+-                    f"====== Recolección de logs del pod {pod} completada ======\n"
+-                )
+-                all_log_file.write(
+-                    "----------------------------------------------------------\n"
+-                )
++                all_log_file.write(f"====== Recolección de logs del pod {pod} completada ======\n")
++                all_log_file.write("----------------------------------------------------------\n")
+ 
+                 print(f"Logs del pod {pod} guardados en {pod_log_path}")
+             except subprocess.CalledProcessError as e:
+@@ -76,17 +48,15 @@ def collect_logs(pods, namespace="default"):
+ 
+ def get_events(namespace="default"):
+     print("Recolección de eventos del cluster:")
+-    with open(logs_dir / "all_events.log", "a", encoding="utf-8") as all_log_file:
++    with open("logs/all_events.log", "a", encoding="utf-8") as all_log_file:
+         all_log_file.write("=============== Eventos del cluster ===============\n")
+         try:
+             events_result = subprocess.run(
+                 ["kubectl", "get", "events", "-n", namespace],
+-                capture_output=True,
+-                text=True,
+-                check=True,
++                capture_output=True, text=True, check=True
+             )
+             all_log_file.write(events_result.stdout)
+-            print(f"Eventos del clúster guardados en {logs_dir / 'all_events.log'}")
++            print("Eventos del clúster guardados en log/all_events.log")
+         except subprocess.CalledProcessError as e:
+             print(f"Error al obtener los eventos: {e.stderr}")
+ 
+diff --git a/scripts/log_collector/log_collector.sh b/scripts/log_collector.sh
+similarity index 100%
+rename from scripts/log_collector/log_collector.sh
+rename to scripts/log_collector.sh
+diff --git a/scripts/metric_collector/README-collector.md b/scripts/metric_collector/README-collector.md
+deleted file mode 100644
+index ab016a3..0000000
+--- a/scripts/metric_collector/README-collector.md
++++ /dev/null
+@@ -1,42 +0,0 @@
+-# Recolector de métricas de los Pods y Nodos
+-
+-Para obtener estás métricas(uso de CPU, memoria) usaremos `kubectl top`.  Ahora para que esto nos funcione necesitamos tener `metrics-server` instalado en nuestro clúster.
+-
+-1. Verificamos nuestro clúster actual, con el comando `kubectl config current-context`, en nuestro caso es docker-desktop. Luego verificamos si `metrics-server` está instalado, lo cual sabemos que aún no lo tenenmos.
+-2. Ya que nuestro clúster es docker-desktop, procedemos a instalar `metrics-server` de la siguiente manera. 
+-    ```sh
+-    # Descargar e instalar la versión más reciente
+-    kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+-
+-    # Editamos el deployment
+-    kubectl edit deployment metrics-server -n kube-system
+-    ```
+-    Al ejecutar el último comando se nos abrirá un editor de texto. En el cual tenemos que buscar la sección
+-    ```yaml
+-    spec:
+-      containers:
+-      - args:
+-        - --cert-dir=/tmp
+-        - --secure-port=4443
+-        - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+-        - --kubelet-use-node-status-port
+-        - --metric-resolution=15s
+-    ```
+-
+-    Al encontrarlo añadimos `- --kubelet-insecure-tls`.
+-
+-    ![](imgs/conf-metrics.png) 
+-
+-3. Guardamos y salimos. Comprobamos que hayamos hecho todos los pasos correctamente y por ende esté instalado correctamente.
+-
+-    ![](imgs/1.png)
+-
+-    - kubectl top pods
+-
+-        ![](imgs/2.png)
+-
+-    - kubectl top node
+-
+-        ![](imgs/3.png)
+-
+-
+diff --git a/scripts/metric_collector/README-visualizer.md b/scripts/metric_collector/README-visualizer.md
+deleted file mode 100644
+index 0251228..0000000
+--- a/scripts/metric_collector/README-visualizer.md
++++ /dev/null
+@@ -1,90 +0,0 @@
+-# Visualización de métricas
+-
+-## Instalar metrics-server
+-kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+-
+-
+-En caso ejecutemos la línea "kubectl top pods -n default" que indique algo como `API no disponible` lo que haremos será
+-
+-### 1.- kubectl get pods -n kube-system
+-
+-Y verificar que existe un pods llamado metric-server-<numero>-<codigo>
+-
+-Si verificamos eso, guardamos el nombre del pods, y editaremos su archivo
+-
+-```bash
+-kubectl edit deployment metrics-server -n kube-system
+-```
+-Esto nos abrirá un editor, y cuando haga esto, buscamos lo siguiente:
+-```bash
+-containers:
+-    - args:
+-        - --cert-dir=/tmp
+-        - --secure-port=10250
+-        - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+-        - --kubelet-use-node-status-port
+-        - --metric-resolution=15s
+-```
+-Cuando encontremos eso, lo que haremos será agregar la siguiente línea
+-```bash
+-        - --kubelet-insecure-tls
+-```
+-**Ojo** Tener cuidado con los espacios
+-
+-Luego guardamos el editor, cerramos el archivo
+-### Mal
+-En caso hayamos editado mal nos aparecerá algo así cuando guardemos el archivo
+-```bash
+-error: deployments.apps "metrics-server" is invalid
+-```
+-Y nos abrirá otro editor
+-
+-### Bien
+-En caso haberlo hecho bien, nos aparecerá este mensaje
+-```bash
+-deployment.apps/metrics-server edited
+-```
+-
+-Ahora con esto, ya podemos ejecutar el comando
+-
+-```bash
+-kubectl top pods -d default
+-```
+-
+-Y nos mostrará el uso de Memory y CPU de los pods que existen en el namespace `default`
+-
+-Así que para la realización de obtención de métricas con `kubectl top` existen 3 formas:
+-```bash
+-##Comandos para obtener métricas de pods y nodes
+-# Métricas de los pods en un namespace en específico
+-kubectl top pods -n <namespace>
+-
+-# Métricas de los pods en el namespace por defecto
+-kubectl top pods
+-
+-# Métricas de los nodes
+-kubectl top nodes
+-```
+-
+-# metric_visualizer.py
+-## Vista general
+-El script de `metric_visualizar.py` se encarga de generar archivos `.csv` donde guardará las métricas obtenidas mediante alguno de los comando anterior según el tipo de elemento que usemos, y de acuerdo a este archivo se encargará de:
+-- Realizar una visualización simple y ordenada de los datos en la consola mediante el uso de tablas
+-- Crear archivos `html` para la visualización mediante gráficos de barras
+-
+-## Función collect_metrics
+-En el archivo `metric_visualizer.py` existen dos funciones de este tipo, uno para los pods `collect_metrics_pods` y otra para los nodos `collect_metric_nodes` esto lo realicé debido a que no se usa el mismo comando para ambos y preferí mantener un orden con la creación de archivos `csv` en vez de crear un `collect_metric_general` que ejecute ambos, así que estas funciones harán lo siguiente:
+-> collect_metrics_pods(namespaces)
+-- Esta función se encargará de revisar todos los `namespace` disponibles en el lista que solicita como argumento, de acuerdo a ello ejecutará el comando `kubectl top pods -d <namespace>` y guardará el resultado en el archivo `<namespace>.csv`, el csv lo creé para que luego sea posible leerlo con la libreria pandas, y de acuerdo a esto, realizar su gráfico de barras
+-
+-> collect_metrics_pods(nodes)
+-- La función necesitará como argumento, una lista de los nodos disponibles, siendo esta verificación la principal ya que si no hay nodos, no existirá algún pod en el sistema, por lo que al asignarle el nombre del nodo, este ejecutará el comando `kubectl top nodes` y el resultado lo guardará en `<node>.csv`
+-
+-## Función clean_raw_metrics 
+-Esta función se encargará de leer el archivo `csv` creado y de acuerdo a esto, con la libreria pandas, lo separará en columnas con el nombre que posee cada columna en el resultado del comando , para así manejar los datos como un DataFrame facilitando su limpieza y visualización posterior
+-
+-## Función show_console_table
+-El objetivo de esta función es para cumplir con el primer requisito de la rúbrica para esta tarea, la cuál es de mostrar los datos en la consola pero de manera ordenada y simple, así que con la libreria tabulate, lo que realicé fue mostrar todos los datos de manera tabulada en la pantalla, haciendo que sea más entendible y fácil de leer al momento de ejecutar el script
+-
+-## Funcion generate_html_graph
+-Esta función termina de cumplir el último objetivo de la tarea, la cuál es generar un archivo `html` donde sea posible su visualización, en un primer momento lo quise realizar de manera vertical, pero luego como hay una gran diferencia entre los datos de las columnas, había perdida de datos o mejor dicho, no se podía ver correctamente algunas barras, así que para esta función lo que hice fue que los gráficos de barras se muestren de manera horizontal, ya que así tendrá más tamaño y podrá verse el gráfico correctamente con todas las columnas que presentan los archivos `csv`
+\ No newline at end of file
+diff --git a/scripts/metric_collector/imgs/1.png b/scripts/metric_collector/imgs/1.png
+deleted file mode 100644
+index 9bf1041..0000000
+Binary files a/scripts/metric_collector/imgs/1.png and /dev/null differ
+diff --git a/scripts/metric_collector/imgs/2.png b/scripts/metric_collector/imgs/2.png
+deleted file mode 100644
+index f70d5ab..0000000
+Binary files a/scripts/metric_collector/imgs/2.png and /dev/null differ
+diff --git a/scripts/metric_collector/imgs/3.png b/scripts/metric_collector/imgs/3.png
+deleted file mode 100644
+index 18982f7..0000000
+Binary files a/scripts/metric_collector/imgs/3.png and /dev/null differ
+diff --git a/scripts/metric_collector/imgs/conf-metrics.png b/scripts/metric_collector/imgs/conf-metrics.png
+deleted file mode 100644
+index 5d9ca5c..0000000
+Binary files a/scripts/metric_collector/imgs/conf-metrics.png and /dev/null differ
+diff --git a/scripts/metric_collector/metric_collector.py b/scripts/metric_collector/metric_collector.py
+deleted file mode 100644
+index f0948a4..0000000
+--- a/scripts/metric_collector/metric_collector.py
++++ /dev/null
+@@ -1,155 +0,0 @@
+-import os
+-from pathlib import Path
+-import sys
+-import subprocess
+-import pandas as pd
+-from tabulate import tabulate
+-import plotly.express as px
+-import json
+-
+-# Comandos para obtener métricas de pods y nodes
+-# 1.- kubectl top pods -n <namespace>
+-# 2.- kubectl top pods
+-# 3.- kubectl top nodes
+-
+-
+-def find_root_dir(target_folder_name):
+-    """
+-    Busca el directorio raíz del proyecto para el nombre de carpeta especificado.
+-    """
+-    current = Path(__file__).resolve()
+-    while current.name != target_folder_name:
+-        if current.parent == current:
+-            raise FileNotFoundError(
+-                f"No se encontró el directorio '{target_folder_name}' hacia arriba desde {__file__}"
+-            )
+-        current = current.parent
+-    return current
+-
+-
+-root_dir = find_root_dir("Proyecto7-PC4")
+-
+-metrics_dir = root_dir / "metrics"
+-metrics_dir.mkdir(exist_ok=True)
+-
+-
+-def get_namespaces():
+-    namespaces = subprocess.run(
+-        ["kubectl", "get", "namespaces", "-o", "name"],
+-        capture_output=True,
+-        text=True,
+-        check=True,
+-    )
+-    all_namespaces = [
+-        line.replace("namespace/", "")
+-        for line in namespaces.stdout.strip().splitlines()
+-    ]
+-    return all_namespaces
+-
+-
+-def get_nodes():
+-    nodes = subprocess.run(
+-        ["kubectl", "get", "nodes", "-o", "name"],
+-        capture_output=True,
+-        text=True,
+-        check=True,
+-    )
+-    all_nodes = [
+-        line.replace("node/", "") for line in nodes.stdout.strip().splitlines()
+-    ]
+-    return all_nodes
+-
+-
+-def collect_metrics__pods(namespaces):
+-    pods_dir = metrics_dir / "pods"
+-    pods_dir.mkdir(exist_ok=True)
+-    print("Recolectando métricas de todos los pods...")
+-    for names in namespaces:
+-        with open(
+-            pods_dir / f"{names}_metrics.csv", "a", encoding="utf-8"
+-        ) as pod_metrics_file:
+-            try:
+-                metrics_result = subprocess.run(
+-                    ["kubectl", "top", "pods", "-n", names],
+-                    capture_output=True,
+-                    text=True,
+-                    check=True,
+-                )
+-                pod_metrics_file.write(metrics_result.stdout)
+-                lines = metrics_result.stdout.strip().split("\n")
+-                if len(lines) > 1:
+-                    headers = lines[0].split()
+-                    metrics = []
+-
+-                    for line in lines[1:]:
+-                        values = line.split()
+-                        metrics.append(dict(zip(headers, values)))
+-
+-                    json_path = pods_dir / f"{names}_metrics.json"
+-                    with open(json_path, "w", encoding="utf-8") as jf:
+-                        json.dump(metrics, jf, indent=2)
+-            except subprocess.CalledProcessError as e:
+-                print(
+-                    f"Error al obtener métricas de los pods en el namespace {names}: {e.stderr}"
+-                )
+-    path = metrics_dir / "pods"
+-    archivos = os.listdir(path)
+-    print(f"Recolección de métricas de pods completada y guardados en: {archivos}")
+-    print("=========================================================")
+-
+-
+-def collect_metrics__nodes(nodes):
+-    nodes_dir = metrics_dir / "nodes"
+-    nodes_dir.mkdir(exist_ok=True)
+-    print("Recolectando métricas de todos los nodos...")
+-    for node in nodes:
+-        with open(
+-            nodes_dir / f"{node}_metrics.csv", "a", encoding="utf-8"
+-        ) as node_metrics_file:
+-            try:
+-                metrics_result = subprocess.run(
+-                    ["kubectl", "top", "nodes"],
+-                    capture_output=True,
+-                    text=True,
+-                    check=True,
+-                )
+-                node_metrics_file.write(metrics_result.stdout)
+-                lines = metrics_result.stdout.strip().split("\n")
+-                if len(lines) > 1:
+-                    headers = lines[0].split()
+-                    metrics = []
+-
+-                    for line in lines[1:]:
+-                        values = line.split()
+-                        metrics.append(dict(zip(headers, values)))
+-
+-                    json_path = nodes_dir / f"{node}_metrics.json"
+-                    with open(json_path, "w", encoding="utf-8") as jf:
+-                        json.dump(metrics, jf, indent=2)
+-            except subprocess.CalledProcessError as e:
+-                print(f"Error al obtener métricas del nodo {node}: {e.stderr}")
+-    path = metrics_dir / "nodes"
+-    archivos = os.listdir(path)
+-    print(f"Recolección de métricas de pods completada y guardados en: {archivos}")
+-    print("=========================================================")
+-
+-
+-def main():
+-    nodes = get_nodes()
+-    if not nodes:
+-        print("No se encontraron nodos.")
+-    else:
+-        print(f"Nodos encontrados: {', '.join(nodes)}")
+-        print("=========================================================")
+-        name = get_namespaces()
+-        if not name:
+-            print("No se encontraron namespaces.")
+-        else:
+-            print(f"Namespaces encontrados: {', '.join(name)}")
+-            print("=========================================================")
+-            collect_metrics__pods(name)
+-            collect_metrics__nodes(nodes)
+-
+-
+-if __name__ == "__main__":
+-    main()
+diff --git a/scripts/metric_collector/metric_visualizer.py b/scripts/metric_collector/metric_visualizer.py
+deleted file mode 100644
+index e627863..0000000
+--- a/scripts/metric_collector/metric_visualizer.py
++++ /dev/null
+@@ -1,138 +0,0 @@
+-import os
+-from pathlib import Path
+-import sys
+-import subprocess
+-import pandas as pd
+-from tabulate import tabulate
+-import plotly.express as px
+-
+-# Comandos para obtener métricas de pods y nodes
+-# 1.- kubectl top pods -n <namespace>
+-# 2.- kubectl top pods
+-# 3.- kubectl top nodes
+-
+-
+-def find_root_dir(target_folder_name):
+-    '''
+-    Busca el directorio raíz del proyecto para el nombre de carpeta especificado.
+-    '''
+-    current = Path(__file__).resolve()
+-    while current.name != target_folder_name:
+-        if current.parent == current:
+-            raise FileNotFoundError(f"No se encontró el directorio '{target_folder_name}' hacia arriba desde {__file__}")
+-        current = current.parent
+-    return current
+-
+-
+-root_dir = find_root_dir("Proyecto7-PC4")
+-
+-metrics_dir = root_dir / "metrics"
+-metrics_dir.mkdir(exist_ok=True)
+-
+-
+-# Visualización de métricas
+-def clean_raw_metrics_pods(pod_path):
+-    df = pd.read_csv(pod_path, sep=r'\s+')
+-    df.columns = ["POD", "CPU_cores(m)", "MEM_bytes(Mi)"]
+-    df["CPU_cores(m)"] = df["CPU_cores(m)"].str.replace("m", "", regex=False).astype(int)
+-    df["MEM_bytes(Mi)"] = df["MEM_bytes(Mi)"].str.replace("Mi", "", regex=False).astype(int)
+-
+-    return df
+-
+-
+-def clean_raw_metrics_nodes(node_path):
+-    df = pd.read_csv(node_path, sep=r'\s+')
+-
+-    df.columns = ["NODE", "CPU_cores(m)", "CPU_%", "MEM_bytes(Mi)", "MEM_%"]
+-
+-    df["CPU_cores(m)"] = df["CPU_cores(m)"].str.replace("m", "", regex=False).astype(str)
+-    df["CPU_%"] = df["CPU_%"].str.replace("%", "", regex=False).astype(str)
+-    df["MEM_bytes(Mi)"] = df["MEM_bytes(Mi)"].str.replace("Mi", "", regex=False).astype(str)
+-    df["MEM_%"] = df["MEM_%"].str.replace("%", "", regex=False).astype(str)
+-
+-    return df
+-
+-
+-def show_console_table(df, name):
+-    print(f"\n=== Tabla resumida de métricas de {name} ===")
+-    print(tabulate(df, headers='keys', tablefmt='fancy_grid'))
+-
+-
+-# Ingresar pods or nodes
+-def visualize_metrics_console():
+-    path = metrics_dir
+-    folders = os.listdir(path)
+-    for folder in folders:
+-        files_path = path / folder
+-        archivos = os.listdir(files_path)
+-        for file in archivos:
+-            if not file.endswith(".csv"):
+-                continue
+-            else:
+-                if folder == "pods":
+-                    with open(files_path / file, "r", encoding="utf-8") as f:
+-                        read = f.read()
+-                    if not read:
+-                        print(f"Las métricas de {file} no están disponibles.")
+-                    else:
+-                        df = clean_raw_metrics_pods(files_path / file)
+-                        show_console_table(df, file)
+-                        generate_html_graph_pods(df, files_path / f"{file.split('.')[0]}.html", f"{file.split('.')[0]}.html")
+-                elif folder == "nodes":
+-                    with open(files_path / file, "r", encoding="utf-8") as f:
+-                        read = f.read()
+-                    if not read:
+-                        print(f"Las métricas de {file} no están disponibles.")
+-                    else:
+-                        df = clean_raw_metrics_nodes(files_path / file)
+-                        show_console_table(df, file)
+-                        generate_html_graph_nodes(df, files_path / f"{file.split('.')[0]}.html", f"{file.split('.')[0]}.html")
+-
+-
+-def generate_html_graph_pods(df, output_path, name):
+-    df_long = df.melt(id_vars="POD", value_vars=["CPU_cores(m)", "MEM_bytes(Mi)"], var_name="Recurso", value_name="Valor")
+-
+-    df_long["Recurso"] = df_long["Recurso"].replace({
+-        "CPU_cores(m)": "CPU (m)",
+-        "MEM_bytes(Mi)": "Memoria (Mi)"
+-    })
+-
+-    fig = px.bar(df_long, y="POD", x="Valor", color="Recurso", barmode="group", orientation="h", title="Uso de CPU y Memoria por Pod")
+-    fig.update_traces(texttemplate='%{x}', textposition='outside')
+-    fig.write_html(output_path)
+-    print(f"\nGráfico HTML guardado en: {name}")
+-
+-
+-def generate_html_graph_nodes(df, output_path, name):
+-    df["CPU_cores(m)"] = df["CPU_cores(m)"].astype(float)
+-    df["CPU_%"] = df["CPU_%"].astype(float)
+-    df["MEM_bytes(Mi)"] = df["MEM_bytes(Mi)"].astype(float)
+-    df["MEM_%"] = df["MEM_%"].astype(float)
+-
+-    df_long = df.melt(
+-        id_vars="NODE",
+-        value_vars=["CPU_cores(m)", "CPU_%", "MEM_bytes(Mi)", "MEM_%"],
+-        var_name="Recurso",
+-        value_name="Valor"
+-    )
+-
+-    df_long["Recurso"] = df_long["Recurso"].replace({
+-        "CPU_cores(m)": "CPU (m)",
+-        "CPU_%": "CPU (%)",
+-        "MEM_bytes(Mi)": "Memoria (Mi)",
+-        "MEM_%": "Memoria (%)"
+-    })
+-
+-    fig = px.bar(df_long, y="NODE", x="Valor", color="Recurso", barmode="group", orientation="h", title="Uso de Recursos por Nodo (CPU y Memoria)")
+-
+-    fig.update_traces(texttemplate='%{x}', textposition='outside')
+-    fig.write_html(output_path)
+-    print(f"\nGráfico HTML guardado en: {name}")
+-
+-
+-def main():
+-    visualize_metrics_console()
+-
+-
+-if __name__ == "__main__":
+-    main()
+diff --git a/tests/test_collector_log.py b/tests/test_collector_log.py
+index 2b177f0..a4c872f 100644
+--- a/tests/test_collector_log.py
++++ b/tests/test_collector_log.py
+@@ -1,6 +1,6 @@
+ import pytest
+ import subprocess
+-from scripts.log_collector.log_collector import get_pods, collect_logs, get_events
++from scripts.log_collector import get_pods, collect_logs, get_events
+ 
+ namespace = "default"
+ 
+@@ -29,7 +29,10 @@ def test_collect_logs_xfail_and_fail():
+         pytest.xfail("No hay pods disponibles en el namespace indicado")
+ 
+     collect_logs(pods[0], namespace=namespace2)
+-    subprocess.run(["rm", "-r", "logs"], capture_output=True, text=True, check=True)
++    subprocess.run(
++        ["rm", "-r", "logs"],
++        capture_output=True, text=True, check=True
++    )
+ 
+ 
+ @pytest.mark.xfail(reason="Algún pod no está disponible")
+@@ -39,4 +42,7 @@ def test_collect_logs_xfail_not_fail():
+         pytest.xfail("No hay pods disponibles en el namespace indicado")
+ 
+     collect_logs(pods[0], namespace=namespace2)
+-    subprocess.run(["rm", "-r", "logs"], capture_output=True, text=True, check=True)
++    subprocess.run(
++        ["rm", "-r", "logs"],
++        capture_output=True, text=True, check=True
++    )
+diff --git a/tests/test_metric_visualizer.py b/tests/test_metric_visualizer.py
+deleted file mode 100644
+index 21fbb90..0000000
+--- a/tests/test_metric_visualizer.py
++++ /dev/null
+@@ -1,32 +0,0 @@
+-import pytest
+-from scripts.metric_collector import metric_collector
+-from scripts.metric_collector import metric_visualizer
+-
+-
+-root_dir = metric_visualizer.find_root_dir("Proyecto7-PC4")
+-
+-
+-def setup_module(module):
+-    # Se ejecuta una vez antes de cualquier test en este archivo
+-    print("\n[setup] Ejecutando dependencias...")
+-    metric_collector.main()  # si aplica
+-    metric_visualizer.main()  # o alguna función que prepare el entorno
+-
+-
+-@pytest.mark.xfail(reason="El directorio no existe")
+-def test_not_fing_root_dir():
+-    assert metric_visualizer.find_root_dir("non_existent_dir")
+-
+-
+-def test_find_root_dir():
+-    root = metric_visualizer.find_root_dir("Proyecto7-PC4")
+-    assert root.is_dir()
+-
+-
+-def test_clean_raw_metrics_pods():
+-    pod_path = root_dir / "metrics" / "pods" / "default_metrics.csv"
+-    df = metric_visualizer.clean_raw_metrics_pods(pod_path)
+-    assert not df.empty
+-    assert "POD" in df.columns
+-    assert "CPU_cores(m)" in df.columns
+-    assert "MEM_bytes(Mi)" in df.columns
